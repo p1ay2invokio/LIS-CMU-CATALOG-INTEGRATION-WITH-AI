@@ -1,0 +1,417 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model biblio {
+  bibid               Int      @id @default(autoincrement())
+  create_dt           DateTime @db.DateTime(0)
+  last_change_dt      DateTime @db.DateTime(0)
+  last_change_userid  Int
+  material_cd         Int      @db.SmallInt
+  collection_cd       Int      @db.SmallInt
+  call_nmbr1          String?  @db.VarChar(20)
+  call_nmbr2          String?  @db.VarChar(20)
+  call_nmbr3          String?  @db.VarChar(20)
+  title               String?  @db.Text
+  title_remainder     String?  @db.Text
+  responsibility_stmt String?  @db.Text
+  author              String?  @db.Text
+  topic1              String?  @db.Text
+  topic2              String?  @db.Text
+  topic3              String?  @db.Text
+  topic4              String?  @db.Text
+  topic5              String?  @db.Text
+  opac_flg            String   @db.Char(1)
+  has_cover           String?  @default("N") @db.Char(1)
+  status              String?  @default("รอตรวจสอบ") @db.VarChar(30)
+}
+
+model biblio_copy {
+  bibid           Int
+  copyid          Int
+  create_dt       DateTime  @db.DateTime(0)
+  copy_desc       String?   @db.VarChar(160)
+  barcode_nmbr    String    @db.VarChar(20)
+  status_cd       String    @db.Char(3)
+  status_begin_dt DateTime  @db.DateTime(0)
+  due_back_dt     DateTime? @db.Date
+  mbrid           Int?
+  renewal_count   Int       @db.UnsignedTinyInt
+  staff_id        Int?
+
+  @@id([bibid, copyid])
+  @@index([barcode_nmbr], map: "barcode_index")
+  @@index([mbrid], map: "mbr_index")
+  @@index([staff_id], map: "staff_id_index")
+}
+
+model biblio_field {
+  bibid       Int
+  fieldid     Int
+  tag         Int     @db.SmallInt
+  ind1_cd     String? @db.Char(1)
+  ind2_cd     String? @db.Char(1)
+  subfield_cd String  @db.Char(1)
+  field_data  String? @db.Text
+
+  @@id([bibid, fieldid])
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model biblio_status_hist {
+  bibid           Int
+  copyid          Int
+  status_cd       String    @db.Char(3)
+  status_begin_dt DateTime  @db.DateTime(0)
+  due_back_dt     DateTime? @db.Date
+  mbrid           Int?
+  renewal_count   Int       @db.UnsignedTinyInt
+
+  @@index([bibid, copyid], map: "copy_index")
+  @@index([mbrid], map: "mbr_index")
+  @@ignore
+}
+
+model member {
+  mbrid              Int      @id @default(autoincrement())
+  barcode_nmbr       String   @db.VarChar(20)
+  create_dt          DateTime @db.DateTime(0)
+  last_change_dt     DateTime @db.DateTime(0)
+  last_change_userid Int
+  last_name          String   @db.VarChar(50)
+  first_name         String   @db.VarChar(50)
+  address            String?  @db.Text
+  home_phone         String?  @db.VarChar(15)
+  work_phone         String?  @db.VarChar(15)
+  email              String?  @db.VarChar(128)
+  classification     Int      @db.SmallInt
+  is_active          String?  @default("Y") @db.Char(1)
+  last_activity_dt   DateTime @db.DateTime(0)
+}
+
+model staff {
+  userid             Int      @id @default(autoincrement())
+  create_dt          DateTime @db.DateTime(0)
+  last_change_dt     DateTime @db.DateTime(0)
+  last_change_userid Int
+  username           String   @db.VarChar(20)
+  pwd                String   @db.Char(32)
+  last_name          String   @db.VarChar(30)
+  first_name         String?  @db.VarChar(30)
+  suspended_flg      String   @db.Char(1)
+  admin_flg          String   @db.Char(1)
+  circ_flg           String   @db.Char(1)
+  circ_mbr_flg       String   @db.Char(1)
+  catalog_flg        String   @db.Char(1)
+  reports_flg        String   @db.Char(1)
+  role               Int      @db.SmallInt
+}
+
+model biblio_hold {
+  bibid         Int
+  copyid        Int
+  holdid        Int
+  hold_begin_dt DateTime @db.DateTime(0)
+  mbrid         Int
+
+  @@id([bibid, copyid, holdid])
+  @@index([mbrid], map: "mbr_index")
+}
+
+model biblio_status_dm {
+  code        String @id @db.Char(3)
+  description String @db.VarChar(40)
+  default_flg String @db.Char(1)
+}
+
+model checkout_privs {
+  material_cd    Int @db.SmallInt
+  classification Int @db.SmallInt
+  checkout_limit Int @db.UnsignedTinyInt
+  renewal_limit  Int @db.UnsignedTinyInt
+
+  @@id([material_cd, classification])
+}
+
+model collection_dm {
+  code           Int     @id @default(autoincrement()) @db.SmallInt
+  description    String  @db.VarChar(40)
+  default_flg    String  @db.Char(1)
+  days_due_back  Int     @db.UnsignedTinyInt
+  daily_late_fee Decimal @db.Decimal(4, 2)
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model cover_options {
+  aws_key        String? @db.VarChar(50)
+  aws_secret_key String? @db.VarChar(50)
+  aws_account_id String? @db.VarChar(50)
+
+  @@ignore
+}
+
+model cutter {
+  theName String @id @default("") @db.VarChar(32)
+  theNmbr Int    @default(0) @db.MediumInt
+}
+
+model lookup_hosts {
+  id      Int                 @id @default(autoincrement()) @db.UnsignedInt
+  seq     Int                 @db.TinyInt
+  active  lookup_hosts_active @default(n)
+  host    String              @db.VarChar(50)
+  name    String              @db.VarChar(100)
+  db      String              @db.VarChar(20)
+  user    String?             @db.VarChar(20)
+  pw      String?             @db.VarChar(20)
+  charset String              @default("") @db.VarChar(20)
+}
+
+model lookup_manual {
+  qmid    Int      @id @default(autoincrement())
+  isbn    String   @db.VarChar(10)
+  created DateTime @default(now()) @db.Timestamp(0)
+  hits    Int      @default(1) @db.TinyInt
+}
+
+model lookup_queue {
+  qid     Int                 @id @default(autoincrement())
+  isbn    String              @db.VarChar(10)
+  status  lookup_queue_status @default(queue)
+  updated DateTime            @default(now()) @db.Timestamp(0)
+  tries   Int                 @default(0) @db.TinyInt
+  amount  Int                 @default(1) @db.SmallInt
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model lookup_settings {
+  protocol      lookup_settings_protocol      @default(YAZ)
+  max_hits      Int                           @default(25) @db.TinyInt
+  keep_dashes   lookup_settings_keep_dashes   @default(n)
+  callNmbr_type lookup_settings_callNmbr_type @default(Dew)
+  auto_dewey    lookup_settings_auto_dewey    @default(y)
+  default_dewey String                        @default("813.52") @db.VarChar(10)
+  auto_cutter   lookup_settings_auto_cutter   @default(y)
+  cutter_type   lookup_settings_cutter_type   @default(CS3)
+  cutter_word   Int                           @default(1) @db.TinyInt
+  auto_collect  lookup_settings_auto_collect  @default(y)
+  fiction_name  String                        @default("Fiction") @db.VarChar(10)
+  fiction_code  Int                           @default(1) @db.TinyInt
+  fiction_loc   String                        @default("PQ PR PS PT PU PV PW PX PY PZ") @db.VarChar(255)
+  fiction_dewey String                        @default("813 823") @db.VarChar(255)
+  cron_url      String?                       @db.Text
+
+  @@ignore
+}
+
+model material_type_dm {
+  code        Int     @id @default(autoincrement()) @db.SmallInt
+  description String  @db.VarChar(40)
+  default_flg String  @db.Char(1)
+  image_file  String? @db.VarChar(128)
+}
+
+model material_usmarc_xref {
+  xref_id    Int    @id @default(autoincrement())
+  materialCd Int    @default(0)
+  tag        String @default("") @db.Char(3)
+  subfieldCd String @default("") @db.Char(1)
+  descr      String @default("") @db.VarChar(64)
+  required   String @default("") @db.Char(1)
+  cntrltype  String @default("") @db.Char(1)
+}
+
+model mbr_classify_dm {
+  code        Int     @id @default(autoincrement()) @db.SmallInt
+  description String  @db.VarChar(40)
+  default_flg String  @db.Char(1)
+  max_fines   Decimal @db.Decimal(4, 2)
+}
+
+model member_account {
+  mbrid               Int
+  transid             Int
+  create_dt           DateTime @db.DateTime(0)
+  create_userid       Int
+  transaction_type_cd String   @db.Char(2)
+  amount              Decimal  @db.Decimal(8, 2)
+  description         String?  @db.VarChar(128)
+
+  @@id([mbrid, transid])
+}
+
+model member_fields {
+  mbrid Int
+  code  String @db.VarChar(16)
+  data  String @db.Text
+
+  @@id([mbrid, code])
+  @@index([code], map: "code_index")
+}
+
+model member_fields_dm {
+  code        String @id @db.VarChar(16)
+  description String @db.Char(32)
+  default_flg String @db.Char(1)
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model session {
+  userid          Int
+  last_updated_dt DateTime @db.DateTime(0)
+  token           Int
+
+  @@ignore
+}
+
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model settings {
+  library_name                   String? @db.VarChar(128)
+  library_image_url              String? @db.Text
+  use_image_flg                  String  @db.Char(1)
+  library_hours                  String? @db.VarChar(128)
+  library_phone                  String? @db.VarChar(40)
+  library_url                    String? @db.Text
+  opac_url                       String? @db.Text
+  session_timeout                Int     @db.SmallInt
+  items_per_page                 Int     @db.TinyInt
+  version                        String  @db.VarChar(10)
+  themeid                        Int     @db.SmallInt
+  purge_history_after_months     Int     @db.SmallInt
+  block_checkouts_when_fines_due String  @db.Char(1)
+  hold_max_days                  Int     @db.SmallInt
+  locale                         String  @db.VarChar(8)
+  charset                        String? @db.VarChar(20)
+  html_lang_attr                 String? @db.VarChar(8)
+  font_normal                    String? @default("th-sarabun") @db.VarChar(20)
+  font_size                      Int?    @default(14) @db.TinyInt
+  inactive_member_after_days     Int?    @default(90) @db.SmallInt
+
+  @@ignore
+}
+
+model theme {
+  themeid             Int    @id @default(autoincrement()) @db.SmallInt
+  theme_name          String @db.VarChar(40)
+  title_bg            String @db.VarChar(20)
+  title_font_face     String @db.VarChar(128)
+  title_font_size     Int    @db.TinyInt
+  title_font_bold     String @db.Char(1)
+  title_font_color    String @db.VarChar(20)
+  title_align         String @db.VarChar(30)
+  primary_bg          String @db.VarChar(20)
+  primary_font_face   String @db.VarChar(128)
+  primary_font_size   Int    @db.TinyInt
+  primary_font_color  String @db.VarChar(20)
+  primary_link_color  String @db.VarChar(20)
+  primary_error_color String @db.VarChar(20)
+  alt1_bg             String @db.VarChar(20)
+  alt1_font_face      String @db.VarChar(128)
+  alt1_font_size      Int    @db.TinyInt
+  alt1_font_color     String @db.VarChar(20)
+  alt1_link_color     String @db.VarChar(20)
+  alt2_bg             String @db.VarChar(20)
+  alt2_font_face      String @db.VarChar(128)
+  alt2_font_size      Int    @db.TinyInt
+  alt2_font_color     String @db.VarChar(20)
+  alt2_link_color     String @db.VarChar(20)
+  alt2_font_bold      String @db.Char(1)
+  border_color        String @db.VarChar(20)
+  border_width        Int    @db.TinyInt
+  table_padding       Int    @db.TinyInt
+}
+
+model transaction_type_dm {
+  code        String @id @db.Char(2)
+  description String @db.VarChar(40)
+  default_flg String @db.Char(1)
+}
+
+model usmarc_block_dm {
+  block_nmbr  Int    @id @db.TinyInt
+  description String @db.VarChar(80)
+}
+
+model usmarc_indicator_dm {
+  tag            Int    @db.SmallInt
+  indicator_nmbr Int    @db.TinyInt
+  indicator_cd   String @db.Char(1)
+  description    String @db.VarChar(80)
+
+  @@id([tag, indicator_nmbr, indicator_cd])
+}
+
+model usmarc_subfield_dm {
+  tag            Int    @db.SmallInt
+  subfield_cd    String @db.Char(1)
+  description    String @db.VarChar(80)
+  repeatable_flg String @db.Char(1)
+
+  @@id([tag, subfield_cd])
+}
+
+model usmarc_tag_dm {
+  block_nmbr       Int    @db.TinyInt
+  tag              Int    @db.SmallInt
+  description      String @db.VarChar(80)
+  ind1_description String @db.VarChar(80)
+  ind2_description String @db.VarChar(80)
+  repeatable_flg   String @db.Char(1)
+
+  @@id([block_nmbr, tag])
+}
+
+enum lookup_settings_protocol {
+  YAZ
+  SRU
+}
+
+enum lookup_hosts_active {
+  y
+  n
+}
+
+enum lookup_queue_status {
+  queue
+  manual
+  publish
+  copy
+  cover
+}
+
+enum lookup_settings_keep_dashes {
+  y
+  n
+}
+
+enum lookup_settings_callNmbr_type {
+  LoC
+  Dew
+  UDC
+  local
+}
+
+enum lookup_settings_auto_dewey {
+  y
+  n
+}
+
+enum lookup_settings_auto_cutter {
+  y
+  n
+}
+
+enum lookup_settings_cutter_type {
+  LoC
+  CS3
+}
+
+enum lookup_settings_auto_collect {
+  y
+  n
+}
