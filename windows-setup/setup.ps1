@@ -11,7 +11,7 @@
 #    5. Bun runtime (runs the TypeScript server, no Node.js needed)
 #    6. Copy server app, write .env, install packages, prisma generate
 #    7. Run server in background on boot (Task Scheduler, SYSTEM, auto-restart)
-#    8. Cloudflare Zero Trust tunnel as a Windows service (token only, no login)
+#    8. Cloudflare tunnel as a Windows service (.json credentials file or Zero Trust token)
 # ==========================================================================
 
 $ErrorActionPreference = 'Continue'
@@ -149,9 +149,15 @@ $DbName       = Cfg 'DB_NAME' 'library'
 $DbUser       = Cfg 'DB_USER' 'root'
 $DbPassword   = Cfg 'DB_PASSWORD' ''
 $ServerPort   = [int](Cfg 'SERVER_PORT' '3001')
+$CfHostname   = Cfg 'CLOUDFLARE_HOSTNAME' 'api.liscmu.online'
 $CfToken      = Cfg 'CLOUDFLARE_TOKEN' ''
 $GeminiKey    = Cfg 'GEMINI_API_KEY' ''
 $InstallApache = (Cfg 'INSTALL_APACHE' 'yes') -match '^(y|yes|true|1)$'
+
+$CfJsonSrc = Get-ChildItem -Path (Join-Path $SetupRoot 'cloudflared') -Filter '*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $CfJsonSrc) {
+  $CfJsonSrc = Get-ChildItem -Path $SetupRoot -Filter '*.json' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+}
 
 $BinDir  = Join-Path $InstallDir 'bin'
 $AppDir  = Join-Path $InstallDir 'app'
@@ -176,7 +182,7 @@ if (-not [Environment]::Is64BitOperatingSystem) { Fail "64-bit Windows is requir
 $build = [Environment]::OSVersion.Version.Build
 if ($build -lt 17763) { Write-Warn2 "Windows build $build detected. Bun needs Windows 10 (1809) or newer - setup may fail." }
 if ($GeminiKey -eq '') { Write-Warn2 "GEMINI_API_KEY is empty - AI features will not work until you set it." }
-if ($CfToken -eq '')   { Write-Warn2 "CLOUDFLARE_TOKEN is empty - tunnel step will be skipped." }
+if (-not $CfJsonSrc -and $CfToken -eq '') { Write-Warn2 "No cloudflared/*.json and CLOUDFLARE_TOKEN is empty - tunnel step will be skipped." }
 
 # ------------------------------------------------------------------ 1. VC++ 2012
 Write-Step "1/8 Visual C++ 2012 runtime (x86) for XAMPP 1.8.3"
@@ -397,9 +403,9 @@ $toolsSrc = Join-Path $SetupRoot 'tools'
 if (Test-Path $toolsSrc) { Copy-Item -Path (Join-Path $toolsSrc '*') -Destination $InstallDir -Force }
 
 # ------------------------------------------------------------------ 8. Cloudflare tunnel
-Write-Step "8/8 Cloudflare Zero Trust tunnel"
-if ($CfToken -eq '') {
-  Write-Warn2 "Skipped (CLOUDFLARE_TOKEN empty)"
+Write-Step "8/8 Cloudflare Tunnel"
+if (-not $CfJsonSrc -and $CfToken -eq '') {
+  Write-Warn2 "Skipped (put <Tunnel-UUID>.json in .\cloudflared\ or set CLOUDFLARE_TOKEN in config.ini)"
 } else {
   $CfExe = Join-Path $BinDir 'cloudflared.exe'
   if (-not (Test-Path $CfExe)) {
@@ -407,20 +413,68 @@ if ($CfToken -eq '') {
     Copy-Item -LiteralPath $dl -Destination $CfExe -Force
   }
   if (Get-Service -Name 'cloudflared' -ErrorAction SilentlyContinue) {
-    Write-Host "    Re-installing existing cloudflared service (to apply token) ..."
+    Write-Host "    Re-installing existing cloudflared service ..."
     Stop-Service cloudflared -Force -ErrorAction SilentlyContinue
     & $CfExe service uninstall 2>&1 | Out-Host
     Start-Sleep -Seconds 2
   }
-  & $CfExe service install $CfToken 2>&1 | Out-Host
+
+  if ($CfJsonSrc) {
+    # Method 1: .json credentials file + config.yml (no Zero Trust dashboard needed)
+    $CfDir = Join-Path $InstallDir 'cloudflared'
+    New-Item -ItemType Directory -Force -Path $CfDir | Out-Null
+
+    $tunnelId = $CfJsonSrc.BaseName
+    try {
+      $parsed = Get-Content -LiteralPath $CfJsonSrc.FullName -Raw | ConvertFrom-Json
+      if ($parsed.TunnelID) { $tunnelId = $parsed.TunnelID }
+    } catch {}
+
+    $destJson = Join-Path $CfDir "$tunnelId.json"
+    Copy-Item -LiteralPath $CfJsonSrc.FullName -Destination $destJson -Force
+
+    $destCfg = Join-Path $CfDir 'config.yml'
+    $customCfg = Join-Path $SetupRoot 'cloudflared\config.yml'
+    if (Test-Path $customCfg) {
+      $cfgText = Get-Content -LiteralPath $customCfg -Raw
+      $cfgText = [regex]::Replace($cfgText, '(?m)^tunnel\s*:.*$', "tunnel: $tunnelId")
+      $cfgText = [regex]::Replace($cfgText, '(?m)^credentials-file\s*:.*$', "credentials-file: $destJson")
+    } else {
+      $cfgText = @"
+tunnel: $tunnelId
+credentials-file: $destJson
+
+ingress:
+  - hostname: $CfHostname
+    service: http://localhost:$ServerPort
+  - service: http_status:404
+"@
+    }
+    Write-Utf8NoBom $destCfg $cfgText
+    Write-Ok "Wrote $destCfg (tunnel $tunnelId -> $CfHostname -> localhost:$ServerPort)"
+
+    # Also copy to systemprofile\.cloudflared (default path for Windows LocalSystem service)
+    $sysCfDir = Join-Path $env:SystemRoot 'System32\config\systemprofile\.cloudflared'
+    New-Item -ItemType Directory -Force -Path $sysCfDir -ErrorAction SilentlyContinue | Out-Null
+    Copy-Item -LiteralPath $destJson -Destination (Join-Path $sysCfDir "$tunnelId.json") -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $destCfg  -Destination (Join-Path $sysCfDir 'config.yml') -Force -ErrorAction SilentlyContinue
+
+    & $CfExe service install 2>&1 | Out-Host
+    & sc.exe config cloudflared binPath= "`"$CfExe`" --config `"$destCfg`" tunnel run" start= auto | Out-Null
+  } else {
+    # Method 2: Zero Trust token
+    & $CfExe service install $CfToken 2>&1 | Out-Host
+  }
+
   Start-Sleep -Seconds 3
   $cf = Get-Service -Name 'cloudflared' -ErrorAction SilentlyContinue
   if ($cf) {
     Set-Service -Name 'cloudflared' -StartupType Automatic
     if ($cf.Status -ne 'Running') { Start-Service cloudflared -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 2
     Write-Ok "cloudflared service: $((Get-Service cloudflared).Status)"
   } else {
-    Write-Warn2 "cloudflared service was not created - check the token."
+    Write-Warn2 "cloudflared service was not created."
   }
 }
 
@@ -448,7 +502,11 @@ if ($ok) {
 Write-Host "==========================================================" -ForegroundColor Green
 Write-Host "   Local    : http://localhost:$ServerPort"
 foreach ($ip in $ips) { Write-Host "   Network  : http://$($ip):$ServerPort" }
-Write-Host "   Tunnel   : point your Cloudflare public hostname to http://localhost:$ServerPort"
+if ($CfJsonSrc) {
+  Write-Host "   Tunnel   : https://$CfHostname -> http://localhost:$ServerPort"
+} else {
+  Write-Host "   Tunnel   : point your Cloudflare public hostname to http://localhost:$ServerPort"
+}
 Write-Host "   Logs     : $LogDir"
 Write-Host "   Tools    : $InstallDir (START / STOP / STATUS .bat)"
 Write-Host ""

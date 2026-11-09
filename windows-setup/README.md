@@ -1,13 +1,16 @@
 # LIS CMU Catalog: ตัวติดตั้งสำหรับ Windows (กดครั้งเดียว)
 
 ## เตรียมบน Mac (ทำครั้งเดียว)
-1. `cp config.example.ini config.ini` แล้วกรอก
-   - `CLOUDFLARE_TOKEN`: เอามาจาก Cloudflare Zero Trust > Networks > Tunnels > (tunnel เดิม) > Configure > Install connector โดยก๊อปเฉพาะ token ยาวๆ ที่อยู่หลังคำว่า `service install`
+1. วางไฟล์ `.json` ของ Cloudflare Tunnel ไว้ในโฟลเดอร์ `cloudflared/`
+   - ถ้าบน Mac มี `~/.cloudflared/<Tunnel-UUID>.json` อยู่แล้ว ตอนรัน `./build-setup.sh` สคริปต์จะก๊อปปี้มาใส่ใน `cloudflared/` ให้อัตโนมัติ
+2. `cp config.example.ini config.ini` แล้วตรวจสอบค่า
+   - `CLOUDFLARE_HOSTNAME`: โดเมนที่ใช้ชี้เข้า tunnel (ค่าเริ่มต้น `api.liscmu.online`)
    - `GEMINI_API_KEY` (ถ้าไม่กรอก build script จะดึงจาก `app/.env` ให้เอง)
-2. เอาไฟล์ export ฐานข้อมูล (`.sql`) ไปวางใน `database/`
-3. (ไม่บังคับ) วางไฟล์เว็บ PHP เช่น OpenBiblio ใน `htdocs/`
-4. รัน `./build-setup.sh` (ดาวน์โหลดโปรแกรมตอนติดตั้งบน Windows) หรือ `./build-setup.sh --offline` (รวมตัวติดตั้งทุกตัวไว้ในไฟล์ zip เลย ขนาดประมาณ 250 MB)
-5. จะได้ไฟล์ `dist/LIS-Catalog-Setup.zip`
+   - `CLOUDFLARE_TOKEN`: เว้นว่างไว้ได้เลยเมื่อใช้ไฟล์ `.json` (หรือใส่เฉพาะกรณีต้องการใช้ Zero Trust token)
+3. เอาไฟล์ export ฐานข้อมูล (`.sql`) ไปวางใน `database/`
+4. (ไม่บังคับ) วางไฟล์เว็บ PHP เช่น OpenBiblio ใน `htdocs/`
+5. รัน `./build-setup.sh` (ดาวน์โหลดโปรแกรมตอนติดตั้งบน Windows) หรือ `./build-setup.sh --offline` (รวมตัวติดตั้งทุกตัวไว้ในไฟล์ zip เลย ขนาดประมาณ 250 MB)
+6. จะได้ไฟล์ `dist/LIS-Catalog-Setup.zip`
 
 ## บนเครื่อง Windows
 1. แตกไฟล์ zip
@@ -21,9 +24,7 @@
 | MySQL (XAMPP 1.8.3) | Windows Service `mysql` |
 | Apache (XAMPP) | Windows Service `Apache2.4` |
 | Server (Bun, พอร์ต 3001) | Task Scheduler `LIS-Catalog-Server` (รันด้วยบัญชี SYSTEM และเปิดใหม่เองถ้าล่ม) |
-| Cloudflare Tunnel | Windows Service `cloudflared` (ใช้ token อย่างเดียว ไม่ต้อง login) |
-
-ใน Cloudflare Zero Trust ให้ตั้ง Public Hostname ของ tunnel ชี้ไปที่ `http://localhost:3001`
+| Cloudflare Tunnel | Windows Service `cloudflared` (ใช้ไฟล์ `.json` + `config.yml` ที่สร้างให้อัตโนมัติ ไม่ต้องใช้ Zero Trust และไม่ต้อง login) |
 
 ## จัดการหลังติดตั้ง (`C:\LISCatalog`)
 - `STATUS.bat`: ดูสถานะของทุกส่วน และ log ล่าสุด

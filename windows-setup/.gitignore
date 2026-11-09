@@ -4,3 +4,5 @@ downloads/
 database/*.sql
 htdocs/*
 !htdocs/README.txt
+cloudflared/*
+!cloudflared/README.txt

@@ -6,7 +6,9 @@
 #    ./build-setup.sh --offline  -> also bundle XAMPP / Bun / cloudflared / VC++ (~250 MB)
 #
 #  Before building:
-#    - cp config.example.ini config.ini   and fill in CLOUDFLARE_TOKEN, GEMINI_API_KEY
+#    - Put your tunnel credentials (<UUID>.json) in cloudflared/
+#      (or if ~/.cloudflared/*.json exists on this Mac, this script copies it automatically)
+#    - cp config.example.ini config.ini   and fill in CLOUDFLARE_HOSTNAME, GEMINI_API_KEY
 #    - put your database export (*.sql) in database/
 #    - (optional) put PHP site files (e.g. OpenBiblio) in htdocs/
 # ------------------------------------------------------------------
@@ -23,23 +25,36 @@ OFFLINE=0
 # --- config.ini ---
 if [[ ! -f config.ini ]]; then
   cp config.example.ini config.ini
-  # prefill Gemini key from the app .env if present
-  if [[ -f "$APP_SRC/.env" ]]; then
-    KEY=$(grep -E '^GEMINI_API_KEY=' "$APP_SRC/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)
-    if [[ -n "$KEY" ]]; then
-      sed -i '' "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$KEY|" config.ini 2>/dev/null || sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$KEY|" config.ini
-    fi
-  fi
-  echo "Created config.ini (GEMINI_API_KEY copied from app/.env if found)."
+  echo "Created config.ini."
 fi
-grep -qE '^CLOUDFLARE_TOKEN=.+' config.ini || echo "WARNING: CLOUDFLARE_TOKEN is empty in config.ini"
+# prefill Gemini key from the app .env if empty in config.ini
+if ! grep -qE '^GEMINI_API_KEY=.+' config.ini && [[ -f "$APP_SRC/.env" ]]; then
+  KEY=$(grep -E '^GEMINI_API_KEY=' "$APP_SRC/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)
+  if [[ -n "$KEY" ]]; then
+    sed -i '' "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$KEY|" config.ini 2>/dev/null || sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$KEY|" config.ini
+    echo "Copied GEMINI_API_KEY from app/.env into config.ini."
+  fi
+fi
+# --- cloudflared/*.json ---
+mkdir -p cloudflared
+if ! ls cloudflared/*.json >/dev/null 2>&1; then
+  if ls "$HOME/.cloudflared/"*.json >/dev/null 2>&1; then
+    cp "$HOME/.cloudflared/"*.json cloudflared/
+    chmod 644 cloudflared/*.json
+    echo "Copied tunnel credentials from ~/.cloudflared/*.json into cloudflared/"
+  fi
+fi
+
+if ! ls cloudflared/*.json >/dev/null 2>&1 && ! grep -qE '^CLOUDFLARE_TOKEN=.+' config.ini; then
+  echo "WARNING: No cloudflared/*.json and CLOUDFLARE_TOKEN is empty in config.ini"
+fi
 ls database/*.sql >/dev/null 2>&1 || echo "WARNING: no database/*.sql - DB will be empty"
 
 # --- assemble ---
 rm -rf "$HERE/dist"
 mkdir -p "$OUT"
 cp SETUP.bat setup.ps1 config.ini config.example.ini README.md "$OUT/"
-cp -R tools database htdocs "$OUT/"
+cp -R tools database htdocs cloudflared "$OUT/"
 
 rsync -a \
   --exclude node_modules --exclude .git --exclude .env --exclude cert --exclude generated \
