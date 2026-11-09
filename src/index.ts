@@ -9,10 +9,51 @@ import dotenv from 'dotenv'
 import { GoogleGenAI } from '@google/genai'
 import fs from 'fs'
 import https from 'https'
+import dns from 'node:dns'
+
+// บังคับใช้ IPv4 สำหรับ Google API เนื่องจาก Bun fetch พยายามต่อ IPv6 ที่ค้างในเครือข่ายนี้
+const origFetch = globalThis.fetch
+globalThis.fetch = (async (input: any, init?: any) => {
+  const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input?.url
+  if (urlStr && urlStr.includes("googleapis.com")) {
+    const u = new URL(urlStr)
+    const { address } = await dns.promises.lookup(u.hostname, { family: 4 })
+    const hdrs = Object.fromEntries(new Headers(init?.headers).entries())
+    delete hdrs["accept-encoding"]
+    hdrs["host"] = u.hostname
+    const bodyBuf = init?.body ? Buffer.from(init.body) : undefined
+    if (bodyBuf) hdrs["content-length"] = String(bodyBuf.byteLength)
+
+    return new Promise<Response>((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: address,
+          servername: u.hostname,
+          port: Number(u.port) || 443,
+          path: u.pathname + u.search,
+          method: init?.method || "GET",
+          headers: hdrs,
+        },
+        (res) => {
+          const chunks: Buffer[] = []
+          res.on("data", (c) => chunks.push(Buffer.from(c)))
+          res.on("end", () => {
+            const body = Buffer.concat(chunks)
+            resolve(new Response(body, { status: res.statusCode || 200, headers: res.headers as any }))
+          })
+        }
+      )
+      req.on("error", reject)
+      if (bodyBuf) req.write(bodyBuf)
+      req.end()
+    })
+  }
+  return origFetch(input, init)
+}) as any
 
 let env = dotenv.config().parsed
 
-const ai = new GoogleGenAI({ apiKey: env?.GEMINI_API_KEY })
+const ai = new GoogleGenAI({ apiKey: env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY })
 
 const upload = multer({
   storage: multer.memoryStorage()
@@ -243,26 +284,83 @@ app.get('/stats', async (req, res) => {
 
 app.get('/books', async (req, res) => {
   try {
-    let books = await prisma.biblio.findMany({
-      orderBy: { bibid: 'desc' }
+    const isPaginated = req.query.page !== undefined || req.query.limit !== undefined
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1)
+    const limit = Math.max(1, Math.min(100, parseInt(String(req.query.limit || '20'), 10) || 20))
+    const statusParam = String(req.query.status || 'all').trim()
+    const searchParam = String(req.query.search || '').trim()
+    const searchField = String(req.query.searchField || 'all').trim()
+
+    const whereClause: any = {}
+
+    if (statusParam === 'pending' || statusParam === 'รอตรวจสอบ') {
+      whereClause.status = 'รอตรวจสอบ'
+    } else if (statusParam === 'completed' || statusParam === 'เสร็จสิ้น') {
+      whereClause.status = 'เสร็จสิ้น'
+    }
+
+    if (searchParam) {
+      const cleanIsbnSearch = searchParam.replace(/[-\s]/g, '')
+      let matchedIsbnBibids: number[] = []
+
+      if (searchField === 'isbn' || searchField === 'all') {
+        const isbnRows: Array<{ bibid: number }> = await prisma.$queryRawUnsafe(
+          `SELECT DISTINCT bibid FROM biblio_field WHERE tag = 20 AND subfield_cd = 'a' AND (field_data LIKE ? OR REPLACE(REPLACE(field_data, '-', ''), ' ', '') LIKE ?)`,
+          `%${searchParam}%`,
+          `%${cleanIsbnSearch}%`
+        )
+        matchedIsbnBibids = isbnRows.map(r => Number(r.bibid)).filter(n => !isNaN(n))
+      }
+
+      if (searchField === 'title') {
+        whereClause.title = { contains: searchParam }
+      } else if (searchField === 'author') {
+        whereClause.author = { contains: searchParam }
+      } else if (searchField === 'isbn') {
+        whereClause.bibid = { in: matchedIsbnBibids.length > 0 ? matchedIsbnBibids : [-1] }
+      } else {
+        const orConditions: any[] = [
+          { title: { contains: searchParam } },
+          { author: { contains: searchParam } },
+        ]
+        if (matchedIsbnBibids.length > 0) {
+          orConditions.push({ bibid: { in: matchedIsbnBibids } })
+        }
+        whereClause.OR = orConditions
+      }
+    }
+
+    const total = await prisma.biblio.count({ where: whereClause })
+
+    const books = await prisma.biblio.findMany({
+      where: whereClause,
+      orderBy: { bibid: 'desc' },
+      ...(isPaginated ? { skip: (page - 1) * limit, take: limit } : {})
     })
 
-    // ดึง ISBN จาก biblio_field (tag 20)
-    let isbns = await prisma.biblio_field.findMany({
-      where: { tag: 20, subfield_cd: 'a' }
-    })
+    const pageBibids = books.map(b => b.bibid)
+
+    // ดึง ISBN และ Copies เฉพาะของหนังสือในหน้านี้ (20 รายการ) เพื่อลดภาระของฐานข้อมูลและเซิร์ฟเวอร์
+    const [isbns, materials, pageCopies] = await Promise.all([
+      pageBibids.length > 0
+        ? prisma.biblio_field.findMany({
+            where: { bibid: { in: pageBibids }, tag: 20, subfield_cd: 'a' }
+          })
+        : Promise.resolve([]),
+      prisma.material_type_dm.findMany(),
+      pageBibids.length > 0
+        ? prisma.biblio_copy.findMany({
+            where: { bibid: { in: pageBibids } },
+            orderBy: { copyid: 'asc' }
+          })
+        : Promise.resolve([]),
+    ])
+
     let isbnMap = new Map(isbns.map(f => [f.bibid, f.field_data]))
-
-    // ดึงประเภททรัพยากร
-    let materials = await prisma.material_type_dm.findMany()
     let matMap = new Map(materials.map(m => [m.code, m.description]))
 
-    // ดึง Copies ทั้งหมดของแต่ละ bibid
-    let allCopies = await prisma.biblio_copy.findMany({
-      orderBy: { copyid: 'asc' }
-    })
-    let copyMap = new Map<number, typeof allCopies>()
-    for (const c of allCopies) {
+    let copyMap = new Map<number, typeof pageCopies>()
+    for (const c of pageCopies) {
       const arr = copyMap.get(c.bibid) || []
       arr.push(c)
       copyMap.set(c.bibid, arr)
@@ -282,6 +380,16 @@ app.get('/books', async (req, res) => {
         barcode: barcodes[0] || "-",
       }
     })
+
+    if (isPaginated) {
+      return res.status(200).send({
+        data: enrichedBooks,
+        total,
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      })
+    }
 
     res.status(200).send(enrichedBooks)
   } catch (error: any) {
@@ -572,17 +680,30 @@ app.get('/book/:id', async (req, res) => {
     const MARC_TAG_NAMES: Record<number, string> = {
       10: "LC Control Number (หมายเลขควบคุม LC)",
       20: "ISBN (เลขมาตรฐานสากลประจำหนังสือ)",
+      22: "ISSN (เลขมาตรฐานสากลประจำวารสาร)",
+      41: "Language Code (รหัสภาษา)",
       50: "LC Call Number (เลขเรียกหนังสือรัฐสภาอเมริกัน)",
       82: "Dewey Call Number (เลขหมู่ดิวอี้ DDC)",
       100: "Main Entry - Personal Name (ผู้แต่งหลัก)",
+      110: "Main Entry - Corporate Name (ผู้แต่งนิติบุคคล)",
       245: "Title Statement (ชื่อเรื่องและการแจ้งความรับผิดชอบ)",
+      246: "Varying Form of Title (ชื่อเรื่องอื่นๆ)",
       250: "Edition Statement (ครั้งที่พิมพ์)",
       260: "Publication, Distribution (ข้อมูลการพิมพ์)",
+      264: "Production, Publication, Distribution (ข้อมูลการผลิตและเผยแพร่)",
       300: "Physical Description (ลักษณะทางกายภาพ)",
+      440: "Series Statement (ชื่อชุด)",
+      490: "Series Statement (แถลงชุด)",
       500: "General Note (หมายเหตุทั่วไป)",
+      504: "Bibliography, etc. Note (หมายเหตุบรรณานุกรม)",
+      505: "Formatted Contents Note (หมายเหตุสารบัญ)",
       520: "Summary, etc. (บทคัดย่อ / สาระสังเขป)",
+      600: "Subject Added Entry - Personal Name (หัวเรื่องบุคคล)",
       650: "Subject Added Entry (หัวเรื่อง)",
+      651: "Subject Added Entry - Geographic Name (หัวเรื่องภูมิศาสตร์)",
       700: "Added Entry - Personal Name (ผู้แต่งร่วม)",
+      710: "Added Entry - Corporate Name (นิติบุคคลร่วม)",
+      856: "Electronic Location and Access (ที่อยู่สื่ออิเล็กทรอนิกส์)",
       902: "Cover Image (ภาพปก)",
     }
 
@@ -684,6 +805,8 @@ app.post('/book', async (req, res) => {
       copiesCount,
       copies,
       status,
+      customTags,
+      customFields,
     } = body
 
     if (!title || !author) {
@@ -762,6 +885,38 @@ app.post('/book', async (req, res) => {
     if (summary) fieldsToInsert.push({ tag: 520, subfield_cd: "a", field_data: String(summary).trim() })
     if (coAuthor1) fieldsToInsert.push({ tag: 700, subfield_cd: "a", field_data: String(coAuthor1).trim() })
     if (coAuthor2) fieldsToInsert.push({ tag: 700, subfield_cd: "a", field_data: String(coAuthor2).trim() })
+
+    // รองรับ Tag ที่ผู้ใช้กดเพิ่มเองหรือ AI เพิ่มให้อัตโนมัติจากหน้า Modal (บันทึกลงตาราง biblio_field)
+    const extraTagsInput = Array.isArray(customTags) ? customTags : (Array.isArray(customFields) ? customFields : [])
+    for (const item of extraTagsInput) {
+      const rawTag = String(item?.tag ?? "").trim()
+      const rawVal = String(item?.value ?? item?.field_data ?? "").trim()
+      if (!rawTag || !rawVal) continue
+
+      const tagNum = parseInt(rawTag.replace(/\D/g, ""), 10)
+      if (isNaN(tagNum) || tagNum <= 0 || tagNum > 32767) continue
+
+      let subfield = "a"
+      const subMatch = rawTag.match(/\$([a-zA-Z0-9])/)
+      if (subMatch && subMatch[1]) {
+        subfield = subMatch[1].toLowerCase()
+      } else if (item?.subfield_cd || item?.subfield) {
+        const cleanedSub = String(item.subfield_cd || item.subfield).replace(/[^a-zA-Z0-9]/g, "")
+        if (cleanedSub) subfield = cleanedSub[0].toLowerCase()
+      }
+
+      // ป้องกันการบันทึกซ้ำหาก tag + subfield + ข้อมูลตรงกับที่มีใน fieldsToInsert แล้ว
+      const isDuplicate = fieldsToInsert.some(
+        (existing) => existing.tag === tagNum && existing.subfield_cd === subfield && existing.field_data === rawVal
+      )
+      if (!isDuplicate) {
+        fieldsToInsert.push({
+          tag: tagNum,
+          subfield_cd: subfield,
+          field_data: rawVal,
+        })
+      }
+    }
 
     for (let i = 0; i < fieldsToInsert.length; i++) {
       const f = fieldsToInsert[i]
@@ -1128,6 +1283,8 @@ app.put('/book/:id', async (req, res) => {
       coAuthor2,
       showInOpac,
       status,
+      customTags,
+      customFields,
     } = body
 
     if (!title || !author) {
@@ -1180,23 +1337,30 @@ app.put('/book/:id', async (req, res) => {
     })
 
     // 2. อัปเดตตาราง biblio_field
-    // ลบ MARC tags เดิมที่เกี่ยวข้องกับฟิลด์เหล่านี้ เพื่อเขียนค่าใหม่
-    // ยกเว้น 082, 100, 245, 650 ตามเงื่อนไขของระบบ (เพราะบันทึกเข้าตาราง biblio แล้ว)
-    const editableTags = [20, 50, 250, 260, 300, 520, 700]
-    await prisma.biblio_field.deleteMany({
-      where: {
-        bibid,
-        tag: { in: editableTags }
-      }
-    })
+    // หากส่ง customTags มาด้วย ให้ลบ biblio_field เดิมทั้งหมดของ bibid นี้เพื่อบันทึกชุดใหม่ (รองรับทั้งการแก้ไข/ลบ/เพิ่ม Tag เพิ่มเติม)
+    const hasCustomTagsPayload = Array.isArray(customTags) || Array.isArray(customFields)
+    if (hasCustomTagsPayload) {
+      await prisma.biblio_field.deleteMany({
+        where: { bibid }
+      })
+    } else {
+      // ลบ MARC tags เดิมที่เกี่ยวข้องกับฟิลด์มาตรฐาน เพื่อเขียนค่าใหม่
+      const editableTags = [20, 50, 250, 260, 300, 520, 700]
+      await prisma.biblio_field.deleteMany({
+        where: {
+          bibid,
+          tag: { in: editableTags }
+        }
+      })
 
-    // ตรวจสอบและลบ 082, 100, 245, 650 ที่อาจหลงเหลือใน biblio_field
-    await prisma.biblio_field.deleteMany({
-      where: {
-        bibid,
-        tag: { in: [82, 100, 245, 650] }
-      }
-    }).catch(() => {})
+      // ตรวจสอบและลบ 082, 100, 245, 650 ที่อาจหลงเหลือใน biblio_field
+      await prisma.biblio_field.deleteMany({
+        where: {
+          bibid,
+          tag: { in: [82, 100, 245, 650] }
+        }
+      }).catch(() => {})
+    }
 
     // รวบรวมฟิลด์ใหม่ที่จะบันทึก
     const fieldsToInsert: { tag: number; subfield_cd: string; field_data: string }[] = []
@@ -1218,6 +1382,32 @@ app.put('/book/:id', async (req, res) => {
     if (summary) fieldsToInsert.push({ tag: 520, subfield_cd: "a", field_data: String(summary).trim() })
     if (coAuthor1) fieldsToInsert.push({ tag: 700, subfield_cd: "a", field_data: String(coAuthor1).trim() })
     if (coAuthor2) fieldsToInsert.push({ tag: 700, subfield_cd: "a", field_data: String(coAuthor2).trim() })
+
+    // บันทึกเขตข้อมูล MARC 21 เพิ่มเติม (Custom Tags) ลงตาราง biblio_field
+    const extraTagsInput = Array.isArray(customTags) ? customTags : (Array.isArray(customFields) ? customFields : [])
+    for (const item of extraTagsInput) {
+      const rawTag = String(item?.tag ?? "").trim()
+      const rawVal = String(item?.value ?? item?.field_data ?? "").trim()
+      if (!rawTag || !rawVal) continue
+
+      const tagNum = parseInt(rawTag.replace(/\D/g, ""), 10)
+      if (isNaN(tagNum) || tagNum <= 0 || tagNum > 32767) continue
+
+      let subfield = "a"
+      const subMatch = rawTag.match(/\$([a-zA-Z0-9])/)
+      if (subMatch && subMatch[1]) {
+        subfield = subMatch[1].toLowerCase()
+      } else if (item?.subfield_cd || item?.subfield) {
+        const cleanedSub = String(item.subfield_cd || item.subfield).replace(/[^a-zA-Z0-9]/g, "")
+        if (cleanedSub) subfield = cleanedSub[0].toLowerCase()
+      }
+
+      fieldsToInsert.push({
+        tag: tagNum,
+        subfield_cd: subfield,
+        field_data: rawVal,
+      })
+    }
 
     // หา fieldid สูงสุดเดิมที่มีอยู่
     const remainingFields = await prisma.biblio_field.findMany({
@@ -1258,6 +1448,9 @@ app.put('/book/:id', async (req, res) => {
 
 
 app.post("/askai", upload.single("image"), async (req, res) => {
+
+  console.log("COME ASK AI")
+
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: "ไม่พบไฟล์รูปภาพ (No image uploaded)" })
@@ -1268,19 +1461,42 @@ app.post("/askai", upload.single("image"), async (req, res) => {
       return res.status(400).json({ success: false, message: "ไม่พบรหัสเซสชัน (sessionId is required)" })
     }
 
+    // แจ้งเตือนฝั่งหน้าจอหลักทันทีว่าได้รับรูปภาพแล้วและ AI กำลังเริ่มคิดวิเคราะห์
+    io.to(sessionId).emit("ai:thinking", {
+      step: "received",
+      message: "Thinking...",
+      timestamp: Date.now(),
+    })
+
     const base64 = req.file.buffer.toString("base64")
 
-    let response: any = await ai.models.generateContent({
-      model: 'gemini-3.5-flash-lite',
-      contents: [
-        {
-          inlineData: {
-            mimeType: req.file.mimetype || 'image/jpeg',
-            data: base64
-          }
-        },
-        {
-          text: `คุณคือผู้เชี่ยวชาญการลงรายการบรรณานุกรมตามมาตรฐาน MARC 21 ของห้องสมุด
+    console.log("PREPARE")
+
+    const requestedModel = typeof req.body.model === "string" && req.body.model.trim()
+      ? req.body.model.trim()
+      : "gemini-3.5-flash-lite"
+
+    const defaultFallbacks = [
+      { name: 'gemini-3.5-flash-lite', disableThinking: false },
+      { name: 'gemini-3.1-flash-lite', disableThinking: false },
+      { name: 'gemini-flash-lite-latest', disableThinking: false },
+      { name: 'gemini-2.5-flash', disableThinking: true },
+    ]
+
+    const fallbackModels = [
+      { name: requestedModel, disableThinking: false },
+      ...defaultFallbacks.filter((m) => m.name !== requestedModel),
+    ]
+
+    const contents = [
+      {
+        inlineData: {
+          mimeType: req.file.mimetype || 'image/jpeg',
+          data: base64
+        }
+      },
+      {
+        text: `คุณคือผู้เชี่ยวชาญการลงรายการบรรณานุกรมตามมาตรฐาน MARC 21 ของห้องสมุด
 จงอ่านข้อมูลจากภาพ (ซึ่งอาจเป็นหน้าปก หน้าปกใน หรือหน้าข้อมูลทางบรรณานุกรม CIP / ข้อมูลลิขสิทธิ์ของหนังสือ) อย่างละเอียด
 โดยเฉพาะตัวอักษรขนาดเล็กและตัวเลขในกรอบข้อมูลทางบรรณานุกรม CIP
 
@@ -1301,14 +1517,51 @@ app.post("/askai", upload.single("image"), async (req, res) => {
   "700_1": "-",
   "700_2": "-"
 }
-ใส่ให้ครบทุก tag ถ้าฟิลด์ใดมีหลายตัวให้ใส่ _ แล้วตามด้วยเลขตามตัวอย่าง (เช่น 260_1 สถานที่, 260_2 สำนักพิมพ์, 260_3 ปีพิมพ์, 650_1, 650_2, 700_1, 700_2)
-หากหาข้อมูลใดไม่พบให้ใส่ค่า "-" หรือเว้นว่างไว้`
-        }
-      ],
-      config: {
-        responseMimeType: "application/json",
+ข้อกำหนดเพิ่มเติม:
+1. ใส่ให้ครบทุก tag พื้นฐานตามตัวอย่าง ถ้าฟิลด์ใดมีหลายตัวให้ใส่ _ แล้วตามด้วยเลข (เช่น 260_1 สถานที่, 260_2 สำนักพิมพ์, 260_3 ปีพิมพ์, 650_1, 650_2, 700_1, 700_2)
+2. หากในภาพมีข้อมูลบรรณานุกรม MARC 21 เขตข้อมูลอื่นๆ เพิ่มเติมที่นอกเหนือจากตัวอย่างข้างต้น (เช่น 041 รหัสภาษา, 246 ชื่อเรื่องอื่นๆ, 440/490 ชื่อชุด, 500 หมายเหตุทั่วไป, 504 บรรณานุกรม, 505 สารบัญ, 520 สาระสังเขป, 600 หัวเรื่องบุคคล, 651 หัวเรื่องภูมิศาสตร์, 650_3 หัวเรื่องที่ 3, 700_3 ผู้แต่งร่วมคนที่ 3, 710 นิติบุคคลร่วม ฯลฯ) ให้เพิ่ม key เป็นเลข Tag 3 หลัก (หรือ Tag_ลำดับ เช่น "500", "490", "650_3") ต่อท้ายใน JSON ได้เลย เพื่อนำไปสร้างช่อง Input อัตโนมัติบนหน้าเว็บ
+3. หากหาข้อมูลใน Tag พื้นฐานใดไม่พบให้ใส่ค่า "-" หรือเว้นว่างไว้`
       }
+    ]
+
+    let response: any = null
+    let lastError: any = null
+
+    for (const modelInfo of fallbackModels) {
+      try {
+        console.log(`Trying AI model: ${modelInfo.name}`)
+        io.to(sessionId).emit("ai:thinking", {
+          step: "analyzing",
+          model: modelInfo.name,
+          message: "Thinking...",
+          timestamp: Date.now(),
+        })
+        response = await ai.models.generateContent({
+          model: modelInfo.name,
+          contents,
+          config: {
+            responseMimeType: "application/json",
+            ...(modelInfo.disableThinking ? { thinkingConfig: { thinkingBudget: 0 } } : {})
+          }
+        })
+        break
+      } catch (err: any) {
+        lastError = err
+        console.warn(`Model ${modelInfo.name} failed (${err?.status || err?.message}), switching to fallback...`)
+      }
+    }
+
+    if (!response) {
+      throw lastError
+    }
+
+    io.to(sessionId).emit("ai:thinking", {
+      step: "extracting",
+      message: "Thinking...",
+      timestamp: Date.now(),
     })
+
+    console.log("RESPONSE : ", response)
 
     let rawText = response.text ? response.text.trim() : "{}"
     if (rawText.startsWith("```json")) {
@@ -1333,6 +1586,13 @@ app.post("/askai", upload.single("image"), async (req, res) => {
     res.status(200).send(provide)
   } catch (error: any) {
     console.error("Error in /askai:", error)
+    const errSessionId = req.body?.sessionId
+    if (errSessionId) {
+      io.to(errSessionId).emit("ai:error", {
+        message: "เกิดข้อผิดพลาดในการประมวลผลด้วย AI",
+        error: error?.message || String(error),
+      })
+    }
     res.status(500).send({
       success: false,
       message: "เกิดข้อผิดพลาดในการประมวลผลด้วย AI",
