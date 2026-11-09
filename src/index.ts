@@ -10,6 +10,7 @@ import { GoogleGenAI } from '@google/genai'
 import fs from 'fs'
 import https from 'https'
 import dns from 'node:dns'
+import os from 'node:os'
 
 // บังคับใช้ IPv4 สำหรับ Google API เนื่องจาก Bun fetch พยายามต่อ IPv6 ที่ค้างในเครือข่ายนี้
 const origFetch = globalThis.fetch
@@ -59,13 +60,17 @@ const upload = multer({
   storage: multer.memoryStorage()
 })
 
-const httpsOptions = {
-  key: fs.readFileSync("./cert/key.pem"),
-  cert: fs.readFileSync("./cert/cert.pem"),
-};
+// ใช้งานจริงผ่าน Cloudflare Tunnel (Cloudflare ทำ HTTPS ให้) → server รันเป็น HTTP ธรรมดา
+// ถ้าอยากทดสอบกล้องมือถือในวง LAN แบบ HTTPS ให้ตั้ง USE_HTTPS=true ใน .env และมีไฟล์ใน ./cert
+const PORT = Number(process.env.PORT) || 3001
+const certKeyPath = "./cert/key.pem"
+const certPath = "./cert/cert.pem"
+const useHttps = process.env.USE_HTTPS === "true" && fs.existsSync(certKeyPath) && fs.existsSync(certPath)
 
 const app = express()
-let server = https.createServer(app)
+let server = useHttps
+  ? https.createServer({ key: fs.readFileSync(certKeyPath), cert: fs.readFileSync(certPath) }, app)
+  : createServer(app)
 let io = new Server(server, {
   cors: {
     origin: "*"
@@ -1667,6 +1672,20 @@ io.on("connection", (socket) => {
   })
 })
 
-server.listen(3001, () => {
-  console.log("Server is running on port 3001")
+// หา IP ของเครื่องนี้อัตโนมัติ (ไม่ต้องระบุ IP ตายตัว)
+function getLocalIPs(): string[] {
+  const ips: string[] = []
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === "IPv4" && !a.internal) ips.push(a.address)
+    }
+  }
+  return ips
+}
+
+server.listen(PORT, "0.0.0.0", () => {
+  const proto = useHttps ? "https" : "http"
+  console.log(`Server is running on port ${PORT} (${proto})`)
+  console.log(`  - Local:   ${proto}://localhost:${PORT}`)
+  for (const ip of getLocalIPs()) console.log(`  - Network: ${proto}://${ip}:${PORT}`)
 })

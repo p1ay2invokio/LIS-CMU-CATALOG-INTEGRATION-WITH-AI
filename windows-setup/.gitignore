@@ -1,0 +1,6 @@
+config.ini
+dist/
+downloads/
+database/*.sql
+htdocs/*
+!htdocs/README.txt
